@@ -2,9 +2,20 @@
   "name": "onboard-to-eth",
   "version": "0.0.1",
   "description": "tooling for ethereum onboarding",
-  "main": "index.js",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "forge test",
+    "build:contracts": "forge build",
+    "build:js": "tsc",
+    "build": "npm run build:contracts && npm run build:js"
   },
   "repository": {
     "type": "git",
@@ -15,5 +26,11 @@
   "bugs": {
     "url": "https://github.com/kassandraoftroy/onboard-to-eth/issues"
   },
-  "homepage": "https://github.com/kassandraoftroy/onboard-to-eth#readme"
+  "homepage": "https://github.com/kassandraoftroy/onboard-to-eth#readme",
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
 }
