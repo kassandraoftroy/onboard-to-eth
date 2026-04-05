@@ -1,6 +1,6 @@
 # onboard-to-eth
 
-Foundry contracts plus TypeScript helpers to onboard with a **passkey-controlled smart account** and an **ENS** name whose multicoin `addr` records point at that account on each chain you care about.
+Foundry contracts plus TypeScript helpers to onboard to ethereum with **passkey-controlled smart accounts** on all chains of interest and an **ENS** name whose multicoin `addr` records point at the account on each chain you care about.
 
 ## Smart account model
 
@@ -36,8 +36,9 @@ The function **`onboard`** in [`onboard/onboard.ts`](onboard/onboard.ts) runs th
 | 1. Reserve | `commit(makeCommitment(registration))` on the **ETH registrar controller** (anti-frontrun commitment). |
 | 2. Wait | Waits for `minCommitmentAge` (plus a short buffer) after the commit is mined. |
 | 3. Finish registration | `register(...)` with **`owner` = predicted passkey account address**, your **resolver**, and registration fee (with default slippage on top of `rentPrice`). |
-| 4. Deploy account | `factory.createAccount(pubKeyX, pubKeyY, salt)` on **every** chain in `chains` (must include `ensChain`). |
-| 5. Set addresses | On `ensChain`, the account **`execute`**s the resolver’s **`multicall`** of **`setAddr`** calls—one per chain in `chains`—so each coin type maps to the same smart account address. |
+| 4. (Optional) Fund other chains | If you pass **`acrossBridge`**, native ETH is moved from the **funding chain** (defaults to `ensChain`) via [Across](https://across.to/) to the payer on each **other** chain in `chains`, only when needed for `createAccount` gas. Unsupported routes fail fast. |
+| 5. Deploy account | `factory.createAccount(pubKeyX, pubKeyY, salt)` on **every** chain in `chains` (must include `ensChain`). |
+| 6. Set addresses | On `ensChain`, the account **`execute`**s the resolver’s **`multicall`** of **`setAddr`** calls—one per chain in `chains`—so each coin type maps to the same smart account address. |
 
 Signing step: the code reads **`digest(resolver, 0, multicallCalldata)`** from the deployed account, you implement **`signPasskey({ challenge })`** to produce a WebAuthn assertion for those bytes, then submits **`execute`** (gas can be paid by any configured `walletClient.account`).
 
@@ -47,7 +48,7 @@ Signing step: the code reads **`digest(resolver, 0, multicallCalldata)`** from t
 - **Node** – `npm install`, `npm run build` (compiles contracts + TypeScript).
 - **Factory** – Deploy `PasskeySmartAccountFactory` and use the **same factory address** on each chain if you want **one** address for the account everywhere.
 - **ENS contracts** – Pass the correct **`controllerAddress`** and **`resolverAddress`** for the network you use. The ABIs in [`onboard/abis.ts`](onboard/abis.ts) match the **`Registration`** shape from [ens-contracts `IETHRegistrarController`](https://github.com/ensdomains/ens-contracts/blob/staging/contracts/ethregistrar/IETHRegistrarController.sol) (`label`, `uint8 reverseRecord`, `bytes32 referrer`). If your deployed controller differs, update the ABI or addresses.
-- **`walletClient.account`** – Must be set (funding EOA for gas and ETH registrar payment).
+- **`walletClient.account`** – Must be set (payer EOA for registrar fees, deployment gas, and optional Across deposits). Without **`acrossBridge`**, that account needs **native balance on every chain** in `chains` for `createAccount`. With **`acrossBridge`**, funding the **funding chain** (default `ensChain`) is enough for ENS, `depositV3` on that chain, and deploy there; every other chain in `chains` must have an Across route from the funding chain (see [supported chains](https://docs.across.to/reference/supported-chains)).
 
 ### Using the TypeScript API
 
@@ -58,12 +59,13 @@ import { createPublicClient, createWalletClient, http } from "viem";
 import { mainnet, optimism } from "viem/chains";
 import { onboard, webAuthnAssertionToAuth } from "onboard-to-eth";
 
-// publicClients: one PublicClient per chainId you pass in `chains`
-// walletClient: must have .account set; same key can fund all chains if you switch chain on send
+// publicClients: one PublicClient per chainId in `chains`
+// walletClient: must have .account set
 
 await onboard({
   chains: [mainnet, optimism],
   ensChain: mainnet,
+  // acrossBridge: {}, // optional: fund only `ensChain`; bridge native ETH via Across for deploy gas elsewhere
   factoryAddress: "0x…",
   passkeyPublicKey: { x: "0x…", y: "0x…" }, // 32-byte hex per coordinate
   salt: "0x…", // bytes32
@@ -100,7 +102,7 @@ Helpers live in [`onboard/passkey.ts`](onboard/passkey.ts) (`webAuthnAssertionTo
 
 ### Exports
 
-Package entry: [`onboard/index.ts`](onboard/index.ts) — `onboard`, `WebAuthnAuth` types, `ensEvmCoinType`, passkey helpers, and optional mainnet address hints in [`onboard/constants.ts`](onboard/constants.ts) (always verify on-chain before production).
+Package entry: [`onboard/index.ts`](onboard/index.ts) — `onboard`, `OnboardParams` / `OnboardResult` (including optional **`bridgeTxHashes`** when `acrossBridge` is used), **`AcrossBridgeConfig`**, `WebAuthnAuth` types, `ensEvmCoinType`, passkey helpers, and optional mainnet address hints in [`onboard/constants.ts`](onboard/constants.ts) (always verify on-chain before production). Across integration helpers live in [`onboard/acrossBridge.ts`](onboard/acrossBridge.ts).
 
 ## Commands
 
