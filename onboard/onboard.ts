@@ -18,8 +18,29 @@ import {
 } from "./abis.js";
 import { ensEvmCoinType } from "./ensCoinType.js";
 import type { WebAuthnAuth } from "./passkey.js";
+import {
+  acrossInputAmountForMinOutput,
+  bridgeEthAcrossDepositV3,
+  fetchAcrossSuggestedFees,
+  resolveAcrossEthRoute,
+  waitForMinNativeBalance,
+} from "./acrossBridge.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export type AcrossBridgeConfig = {
+  /**
+   * Chain where the wallet holds ETH for Across `depositV3` and ENS registration.
+   * Defaults to `ensChain` (typical: fund only Ethereum mainnet).
+   */
+  fundingChain?: Chain;
+  /** Extra bps on top of estimated `createAccount` gas (destination native). Default 3000 (30%). */
+  destinationGasBufferBps?: number;
+  /** Max time to wait for relayer to credit the destination chain. Default 5 minutes. */
+  maxWaitForFillMs?: number;
+  /** Poll interval when waiting for destination native balance. Default 2500 ms. */
+  fillPollMs?: number;
+};
 
 export type OnboardParams = {
   /** Chains where the passkey account should be deployed (must include `ensChain`). */
@@ -49,12 +70,20 @@ export type OnboardParams = {
   signPasskey: (args: { challenge: Uint8Array }) => Promise<WebAuthnAuth>;
   /** Extra wei on top of `rentPrice` for registration (oracle movement). Default 5%. */
   registrationValueSlippageBps?: number;
+  /**
+   * When set, bridges native ETH from `fundingChain` (default `ensChain`) via Across to every other chain in `chains`
+   * so the wallet can pay `createAccount` gas there without holding native tokens on those chains beforehand.
+   * Every chain in `chains` must have an Across native ETH route from the funding chain.
+   */
+  acrossBridge?: AcrossBridgeConfig;
 };
 
 export type OnboardResult = {
   accountAddress: Address;
   ensNode: Hex;
   deployTxHashes: Hex[];
+  /** Across `depositV3` tx hashes on the funding chain (only when `acrossBridge` is set). */
+  bridgeTxHashes?: Hex[];
   reserveTxHash: Hex;
   registerTxHash: Hex;
   setAddrTxHash: Hex;
@@ -162,6 +191,75 @@ export async function onboard(p: OnboardParams): Promise<OnboardResult> {
 
   await ensPublic.waitForTransactionReceipt({ hash: registerHash });
 
+  const bridgeHashes: Hex[] = [];
+  if (p.acrossBridge !== undefined) {
+    const fundingChain = p.acrossBridge.fundingChain ?? ensChain;
+    const destGasBufferBps = p.acrossBridge.destinationGasBufferBps ?? 3000;
+    const maxWaitForFillMs = p.acrossBridge.maxWaitForFillMs ?? 300_000;
+    const fillPollMs = p.acrossBridge.fillPollMs ?? 2500;
+    const fundingPublic = clientFor(publicClients, fundingChain);
+
+    for (const chain of chains) {
+      if (chain.id === fundingChain.id) continue;
+
+      const destPublic = clientFor(publicClients, chain);
+      const gas = await destPublic.estimateContractGas({
+        address: factoryAddress,
+        abi: passkeySmartAccountFactoryAbi,
+        functionName: "createAccount",
+        args: [passkeyPublicKey.x, passkeyPublicKey.y, salt],
+        account: payer.address,
+      });
+      const gasPrice = await destPublic.getGasPrice();
+      const minDestWei = (gas * gasPrice * (10000n + BigInt(destGasBufferBps))) / 10000n;
+
+      const existing = await destPublic.getBalance({ address: payer.address });
+      if (existing >= minDestWei) continue;
+
+      const { inputToken, outputToken } = await resolveAcrossEthRoute(fundingChain.id, chain.id);
+      const { inputAmount } = await acrossInputAmountForMinOutput({
+        inputToken,
+        outputToken,
+        originChainId: fundingChain.id,
+        destinationChainId: chain.id,
+        minOutputWei: minDestWei,
+      });
+
+      const quote = await fetchAcrossSuggestedFees({
+        inputToken,
+        outputToken,
+        originChainId: fundingChain.id,
+        destinationChainId: chain.id,
+        inputAmount,
+      });
+      if (quote.isAmountTooLow || BigInt(quote.outputAmount) < minDestWei) {
+        throw new Error(
+          `Across quote insufficient for chain ${chain.id}: outputAmount=${quote.outputAmount}, need >= ${minDestWei}`,
+        );
+      }
+
+      const bridgeHash = await bridgeEthAcrossDepositV3({
+        walletClient,
+        fundingChain,
+        destinationChainId: chain.id,
+        recipient: payer.address,
+        inputAmount,
+        quote,
+        inputToken,
+        outputToken,
+      });
+      bridgeHashes.push(bridgeHash);
+      await fundingPublic.waitForTransactionReceipt({ hash: bridgeHash });
+      await waitForMinNativeBalance({
+        publicClient: destPublic,
+        address: payer.address,
+        minWei: minDestWei,
+        timeoutMs: maxWaitForFillMs,
+        pollMs: fillPollMs,
+      });
+    }
+  }
+
   const deployHashes: Hex[] = [];
   for (const chain of chains) {
     const pub = clientFor(publicClients, chain);
@@ -218,6 +316,7 @@ export async function onboard(p: OnboardParams): Promise<OnboardResult> {
     accountAddress,
     ensNode: node,
     deployTxHashes: deployHashes,
+    ...(p.acrossBridge !== undefined ? { bridgeTxHashes: bridgeHashes } : {}),
     reserveTxHash: reserveHash,
     registerTxHash: registerHash,
     setAddrTxHash: setAddrHash,

@@ -1,4 +1,9 @@
-export { onboard, type OnboardParams, type OnboardResult } from "./onboard.js";
+export {
+  onboard,
+  type AcrossBridgeConfig,
+  type OnboardParams,
+  type OnboardResult,
+} from "./onboard.js";
 export {
   derP256SignatureToRS,
   webAuthnAssertionToAuth,
